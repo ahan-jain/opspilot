@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, List
 
-def search_logs(query: str, time_range: str = "1h") -> Dict:
+def search_logs(query: str = None, pattern: str = None, time_range: str = "1h") -> Dict:
     """
     Search through log files for matching entries.
     
@@ -19,10 +19,16 @@ def search_logs(query: str, time_range: str = "1h") -> Dict:
             "query": str
         }
     """
-    # Parse time range
+
+    search_term = query or pattern
+    if not search_term:
+        return {
+            "matches": [],
+            "count": 0,
+            "error": "Must provide either 'query' or 'pattern' parameter"
+        }
     cutoff_time = _parse_time_range(time_range)
     
-    # Read log files
     log_dir = os.path.join(os.path.dirname(__file__), "../../data/logs")
     matches = []
     
@@ -43,24 +49,30 @@ def search_logs(query: str, time_range: str = "1h") -> Dict:
                 if log_time < cutoff_time:
                     continue
                 
-                # Check if matches query
-                if query.lower() in log_entry["message"].lower():
+                # Check if matches search_term
+                if ' OR ' in search_term or '|' in search_term:
+                    terms = [t.strip().lower() for t in search_term.replace('|', ' OR ').split(' OR ')]
+                else:
+                    terms = [search_term.lower()]
+
+                if any(term in log_entry["message"].lower() for term in terms):
                     matches.append(log_entry)
     
-    # Sort by timestamp (newest first)
     matches.sort(key=lambda x: x["timestamp"], reverse=True)
     
     return {
         "matches": matches[:100],  # Limit to 100 results
         "count": len(matches),
         "time_range": time_range,
-        "query": query,
-        "searched_at": datetime.utcnow().isoformat()
+        "search_term": search_term,
+        "searched_at": datetime.now().isoformat()
     }
 
 def _parse_time_range(time_range: str) -> datetime:
-    """Convert time_range string to cutoff datetime"""
-    now = datetime.utcnow()
+    now = datetime.now()
+
+    if time_range.startswith("last_"):
+        time_range = time_range[5:]
     
     if time_range.endswith('h'):
         hours = int(time_range[:-1])
@@ -73,17 +85,12 @@ def _parse_time_range(time_range: str) -> datetime:
         return now - timedelta(hours=1)
 
 def _parse_log_line(line: str) -> Dict:
-    """Parse a log line into structured format"""
     try:
-        # Expected format: 2024-12-29T10:30:45 [ERROR] Message here
-        parts = line.strip().split(' ', 2)
-        if len(parts) < 3:
-            return None
-        
-        timestamp = parts[0]
-        level = parts[1].strip('[]')
-        message = parts[2]
-        
+        date, time, level, message = line.strip().split(" ", 3)
+
+        timestamp = f"{date}T{time}"
+        level = level.strip("[]")
+
         return {
             "timestamp": timestamp,
             "level": level,

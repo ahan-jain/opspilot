@@ -5,16 +5,18 @@ from typing import Dict, List, Optional
 import statistics
 
 def query_metrics(
-    metric_name: str,
-    start: str,
-    end: str,
+    metric: str = None,
+    metric_type: str = None,
+    metric_name: str = None,
+    start: str = "1h",
+    end: str = "now",
     interval: str = "5m"
 ) -> Dict:
     """
     Query time-series metrics data.
     
     Args:
-        metric_name: Metric to query (error_rate, response_time, cpu_usage, memory_usage)
+        metric: Metric to query (error_rate, response_time, cpu_usage, memory_usage)
         start: Start time (ISO format or relative like "1h", "24h")
         end: End time (ISO format or "now")
         interval: Data point interval (5m, 15m, 1h)
@@ -29,6 +31,15 @@ def query_metrics(
         }
     """
 
+    metric_to_query = metric or metric_type or metric_name
+    
+    if not metric_to_query:
+        return {
+            "error": "Must provide metric, metric_type, or metric_name parameter",
+            "datapoints": [],
+            "aggregates": {}
+        }
+    
     start_time = _parse_time(start)
     end_time = _parse_time(end)
     
@@ -41,14 +52,14 @@ def query_metrics(
     with open(metrics_file, 'r') as f:
         all_metrics = json.load(f)
     
-    if metric_name not in all_metrics:
+    if metric_to_query not in all_metrics:
         return {
-            "error": f"Metric '{metric_name}' not found",
+            "error": f"Metric '{metric_to_query}' not found",
             "available_metrics": list(all_metrics.keys())
         }
     
     # Filter datapoints by time range
-    raw_datapoints = all_metrics[metric_name]
+    raw_datapoints = all_metrics[metric_to_query]
     filtered_datapoints = []
     
     for point in raw_datapoints:
@@ -69,7 +80,7 @@ def query_metrics(
         aggregates = {"min": 0, "max": 0, "avg": 0, "p95": 0}
     
     return {
-        "metric": metric_name,
+        "metric": metric_to_query,
         "datapoints": filtered_datapoints,
         "aggregates": aggregates,
         "interval": interval,
@@ -81,7 +92,6 @@ def query_metrics(
     }
 
 def _parse_time(time_str: str) -> datetime:
-    """Parse time string to datetime"""
     if time_str == "now":
         return datetime.utcnow()
     

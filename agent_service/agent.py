@@ -4,6 +4,7 @@ import json
 from anthropic import Anthropic
 import logging
 import sys
+import redis
 
 from state_machine import StateMachine, State
 from tools import get_tool, validate_tool_inputs, requires_approval, list_tools
@@ -40,10 +41,15 @@ class Agent:
         self.max_steps = 10  # Safety limit: prevent infinite loops
         self.current_step_number = 0
         self.db = SessionLocal()
+
+        self.redis_client = redis.Redis(
+        host='localhost',
+        port=6379,
+        decode_responses=True
+    )
         
-        # Per-run logging
         self.logger = logging.getLogger(f"Agent-{run_id}")
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
         
         log_file = logging.FileHandler(f"logs/run_{run_id}.log")
         log_file.setFormatter(logging.Formatter(
@@ -51,14 +57,12 @@ class Agent:
         ))
         self.logger.addHandler(log_file)
         
-        # Load run from database
         self.run = self.db.query(Run).filter(Run.id == run_id).first()
         if not self.run:
             raise ValueError(f"Run {run_id} not found")
         
         self.logger.info(f"Initialized agent for run {run_id}: {self.run.goal}")
         
-        # Resume from last step if exists
         existing_steps = self.db.query(Step)\
             .filter(Step.run_id == run_id)\
             .order_by(Step.step_number.desc())\
@@ -73,8 +77,10 @@ class Agent:
         self.logger.info("Starting agent execution")
         
         try:
-            # Main execution loop
             while not self.state_machine.is_terminal():
+                if self.state_machine.current_state == State.NEEDS_APPROVAL:
+                    self.logger.info("Run paused - awaiting approval")
+                    break
                 # Safety check: max steps
                 if self.current_step_number >= self.max_steps:
                     self.logger.warning(f"Max steps ({self.max_steps}) exceeded")
@@ -83,14 +89,16 @@ class Agent:
                     )
                     break
                 
-                self.current_step_number += 1
+                # Only increment step number for PLAN state
+                if self.state_machine.current_state == State.PLAN:
+                    self.current_step_number += 1
+                
                 self.logger.info(f"Executing step {self.current_step_number}, state: {self.state_machine.current_state}")
                 
                 self._execute_current_state()
                 
                 self.db.commit()
             
-            # Update run status based on final state
             if self.state_machine.current_state == State.DONE:
                 self.run.status = RunStatus.DONE
                 self.logger.info("Agent completed successfully")
@@ -127,7 +135,6 @@ class Agent:
         # Build context for LLM
         context = self._build_planning_context()
         
-        # Call Claude API
         try:
             response = self.client.messages.create(
                 model="claude-sonnet-4-20250514",
@@ -158,15 +165,16 @@ class Agent:
             self._transition_to_failed(f"Invalid LLM response format: {str(e)}")
             return
         
+        self.logger.info(f"Parsed plan from LLM: {json.dumps(plan, indent=2)}")
+        
         if "action" not in plan:
             self.logger.error("Missing 'action' field in plan")
             self._transition_to_failed("Invalid plan format: missing 'action'")
             return
         
-        # Store step in database
         step = Step(
             run_id=self.run_id,
-            state=State.PLAN,
+            state=State.PLAN.value,
             step_number=self.current_step_number,
             reasoning=plan.get("reasoning", "")
         )
@@ -176,7 +184,7 @@ class Agent:
         if plan["action"] == "done":
             self.logger.info("Agent decided goal is complete")
             self.state_machine.transition(State.DONE)
-            step.state = State.DONE
+            step.state = State.DONE.value
         
         elif plan["action"] == "call_tool":
             tool_name = plan.get("tool_name")
@@ -237,31 +245,37 @@ class Agent:
         
         return f"""You are an ops automation agent. Your goal is:
 
-{self.run.goal}
+        {self.run.goal}
 
-Available tools:
-{tools_desc}
+        Available tools:
+        {tools_desc}
 
-Previous steps:
-{steps_text}
+        Previous steps:
+        {steps_text}
 
-What should you do next? Respond in JSON format:
+        What should you do next? Respond in JSON format:
 
-If you need to call a tool:
-{{
-    "action": "call_tool",
-    "tool_name": "tool_name_here",
-    "inputs": {{"param": "value"}},
-    "reasoning": "Why I'm calling this tool"
-}}
+        If you need to call a tool:
+        {{
+            "action": "call_tool",
+            "tool_name": "tool_name_here",
+            "inputs": {{"param": "value"}},
+            "reasoning": "Why I'm calling this tool"
+        }}
 
-If the goal is achieved:
-{{
-    "action": "done",
-    "reasoning": "Why the goal is complete"
-}}
+        If the goal is achieved:
+        {{
+            "action": "done",
+            "reasoning": "Why the goal is complete"
+        }}
 
-Respond with ONLY the JSON, no other text."""
+        IMPORTANT: 
+        - When calling a tool, you MUST include all required parameters in "inputs"
+        - For generate_report, "findings" must be an array of objects like:
+        [{{"type": "log", "summary": "No errors found", "details": {{"count": 0}}}}]
+        - NOT a string
+
+        Respond with ONLY the JSON, no other text."""
     
     def _parse_planning_response(self, response_text: str) -> Dict:
         text = response_text.strip()
@@ -297,11 +311,16 @@ Respond with ONLY the JSON, no other text."""
     def _transition_to_failed(self, reason: str):
         self.logger.error(f"Transitioning to FAILED: {reason}")
         
+        # Check if already in terminal state
+        if self.state_machine.current_state in {State.DONE, State.FAILED}:
+            self.logger.warning(f"Already in terminal state {self.state_machine.current_state}, skipping transition")
+            return
+        
         self.state_machine.transition(State.FAILED)
         
         step = Step(
             run_id=self.run_id,
-            state=State.FAILED,
+            state=State.FAILED.value,
             step_number=self.current_step_number + 1,
             reasoning=reason
         )
@@ -350,6 +369,25 @@ Respond with ONLY the JSON, no other text."""
             self._transition_to_failed(f"Invalid tool inputs: {str(e)}")
             return
         
+        retry_key = f"retry:{self.run_id}:{tool_call.id}"
+        attempts = int(self.redis_client.get(retry_key) or 0)
+        
+        if attempts > 0:
+            # Exponential backoff: 1s, 2s, 4s
+            delay = 2 ** (attempts - 1)
+            self.logger.info(f"Retry attempt {attempts}, waiting {delay}s")
+            time.sleep(delay)
+        
+        if requires_approval(tool_call.tool_name):
+            self.logger.info(f"Tool {tool_call.tool_name} requires approval. Pausing before execution.")
+            self.run.status = RunStatus.NEEDS_APPROVAL
+            tool_call.status = ToolCallStatus.PENDING  # keep it pending
+            current_step.state = State.NEEDS_APPROVAL.value
+            self.state_machine.transition(State.NEEDS_APPROVAL)
+
+            self.db.commit()
+            return
+        
         # Execute tool with 30s timeout
         try:
             result = self._execute_tool_with_timeout(
@@ -358,32 +396,57 @@ Respond with ONLY the JSON, no other text."""
                 timeout=30
             )
             
-            # Store result in database
             tool_call.outputs = json.dumps(result)
             tool_call.status = ToolCallStatus.SUCCESS
             tool_call.executed_at = datetime.utcnow()
             
             self.logger.info(f"Tool {tool_call.tool_name} succeeded")
             
+            self.redis_client.delete(retry_key)
+
+            if requires_approval(tool_call.tool_name):
+                self.logger.info(f"Tool {tool_call.tool_name} requires approval - pausing execution")
+                self.state_machine.transition(State.NEEDS_APPROVAL)
+                current_step.state = State.NEEDS_APPROVAL.value
+                self.run.status = RunStatus.NEEDS_APPROVAL
+                self.db.commit()
+                return 
+            
             self.state_machine.transition(State.EVALUATE)
-            current_step.state = State.EVALUATE
+            current_step.state = State.EVALUATE.value
         
         except TimeoutError:
             self.logger.error(f"Tool {tool_call.tool_name} timed out")
-            tool_call.status = ToolCallStatus.FAILED
-            tool_call.error_message = f"Timeout after 30 seconds"
-            self._transition_to_failed(f"Tool {tool_call.tool_name} timed out")
+            
+            if attempts < 3:
+                attempts += 1
+                self.redis_client.setex(retry_key, 3600, attempts)  # 1 hour TTL
+                self.logger.info(f"Scheduling retry {attempts}/3")
+                tool_call.status = ToolCallStatus.PENDING  # Reset to retry
+            else:
+                self.logger.error("Max retries exceeded")
+                tool_call.status = ToolCallStatus.FAILED
+                tool_call.error_message = f"Timeout after 30 seconds (3 retries)"
+                self._transition_to_failed(f"Tool {tool_call.tool_name} timed out after retries")
         
         except Exception as e:
             self.logger.exception(f"Tool {tool_call.tool_name} failed: {str(e)}")
-            tool_call.status = ToolCallStatus.FAILED
-            tool_call.error_message = str(e)
-            tool_call.outputs = json.dumps({"error": str(e)})
             
-            tb = traceback.format_exc()
-            self.logger.debug(f"Full traceback:\n{tb}")
-            
-            self._transition_to_failed(f"Tool error: {str(e)}")
+            if attempts < 3:
+                attempts += 1
+                self.redis_client.setex(retry_key, 3600, attempts)
+                self.logger.info(f"Scheduling retry {attempts}/3 after error")
+                tool_call.status = ToolCallStatus.PENDING  # Reset to retry
+            else:
+                self.logger.error("Max retries exceeded")
+                tool_call.status = ToolCallStatus.FAILED
+                tool_call.error_message = str(e)
+                tool_call.outputs = json.dumps({"error": str(e)})
+                
+                tb = traceback.format_exc()
+                self.logger.debug(f"Full traceback:\n{tb}")
+                
+                self._transition_to_failed(f"Tool error: {str(e)}")
     
     def _execute_tool_with_timeout(
         self,
@@ -405,10 +468,10 @@ Respond with ONLY the JSON, no other text."""
     def _handle_evaluate_state(self):
         self.logger.info("Evaluating progress")
         
-        # Build context for LLM
         context = self._build_evaluation_context()
+
+        self.logger.debug(f"Evaluation context:\n{context[:500]}...")
         
-        # Call Claude API
         try:
             response = self.client.messages.create(
                 model="claude-sonnet-4-20250514",
@@ -444,18 +507,17 @@ Respond with ONLY the JSON, no other text."""
             self._transition_to_failed("Invalid evaluation: missing 'decision'")
             return
         
-        # Store evaluation step
-        step = Step(
-            run_id=self.run_id,
-            state=State.EVALUATE,
-            step_number=self.current_step_number,
-            reasoning=evaluation.get("reasoning", "")
-        )
-        self.db.add(step)
+        current_step = self.db.query(Step)\
+            .filter(Step.run_id == self.run_id, Step.step_number == self.current_step_number)\
+            .first()
+
+        if current_step:
+            current_step.reasoning += f"\n[Evaluation] {evaluation.get('reasoning', '')}"
+            current_step.state = State.EVALUATE.value
         
         decision = evaluation["decision"]
         self.logger.info(f"Evaluation decision: {decision}")
-        
+
         # Transition based on decision
         if decision == "continue":
             self.state_machine.transition(State.PLAN)
@@ -478,8 +540,9 @@ Respond with ONLY the JSON, no other text."""
         steps_detail = []
         for step in steps:
             for tc in step.tool_calls:
+                approval_note = " (REQUIRES APPROVAL)" if requires_approval(tc.tool_name) else ""
                 steps_detail.append(
-                    f"Step {step.step_number}: {tc.tool_name}\n"
+                    f"Step {step.step_number}: {tc.tool_name}{approval_note}\n"
                     f"Inputs: {tc.inputs}\n"
                     f"Outputs: {tc.outputs if tc.outputs else 'N/A'}\n"
                 )
@@ -488,38 +551,40 @@ Respond with ONLY the JSON, no other text."""
         
         return f"""You are evaluating progress on this goal:
 
-{self.run.goal}
+    {self.run.goal}
 
-Steps executed so far:
-{steps_text}
+    Steps executed so far:
+    {steps_text}
 
-Has the goal been achieved? Respond in JSON format:
+    Has the goal been achieved? Respond in JSON format:
 
-If goal is complete:
-{{
-    "decision": "done",
-    "reasoning": "Why the goal is achieved"
-}}
+    If goal is complete:
+    {{
+        "decision": "done",
+        "reasoning": "Why the goal is achieved"
+    }}
 
-If you need to continue (call more tools):
-{{
-    "decision": "continue",
-    "reasoning": "What still needs to be done"
-}}
+    If you need to continue (call more tools):
+    {{
+        "decision": "continue",
+        "reasoning": "What still needs to be done"
+    }}
 
-If you need approval before proceeding:
-{{
-    "decision": "needs_approval",
-    "reasoning": "Why approval is needed"
-}}
+    If a tool marked "(REQUIRES APPROVAL)" was just executed successfully:
+    {{
+        "decision": "needs_approval",
+        "reasoning": "Requesting approval for [tool name]"
+    }}
 
-If goal cannot be achieved:
-{{
-    "decision": "failed",
-    "reasoning": "Why we failed"
-}}
+    If goal cannot be achieved:
+    {{
+        "decision": "failed",
+        "reasoning": "Why we failed"
+    }}
 
-Respond with ONLY the JSON, no other text."""
+    IMPORTANT: If you just executed a tool that requires approval, you MUST respond with "needs_approval".
+
+    Respond with ONLY the JSON, no other text."""
     
     def _parse_evaluation_response(self, response_text: str) -> Dict:
         text = response_text.strip()
@@ -561,6 +626,5 @@ Respond with ONLY the JSON, no other text."""
         
         self.logger.info(f"Pausing for approval of {tool_call.tool_name}")
         
-        # Update run status to indicate approval needed
         self.run.status = RunStatus.NEEDS_APPROVAL
         self.db.commit()

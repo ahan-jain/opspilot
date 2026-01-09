@@ -7,7 +7,8 @@ import uuid
 def create_ticket(
     title: str,
     description: str,
-    severity: str,
+    severity: str = None,
+    priority: str = None,
     tags: list = None
 ) -> Dict:
     """
@@ -32,11 +33,11 @@ def create_ticket(
         }
     """
 
+    severity_level = severity or priority or "medium"
+    
     valid_severities = ["critical", "high", "medium", "low"]
-    if severity not in valid_severities:
-        return {
-            "error": f"Invalid severity. Must be one of: {valid_severities}"
-        }
+    if severity_level not in valid_severities:
+        severity_level = "medium"
     
     # Generate ticket
     ticket_id = f"TICKET-{uuid.uuid4().hex[:8].upper()}"
@@ -46,19 +47,22 @@ def create_ticket(
         "ticket_id": ticket_id,
         "title": title,
         "description": description,
-        "severity": severity,
+        "severity": severity_level,
         "tags": tags or [],
         "status": "open",
         "created_at": created_at,
         "created_by": "opspilot-agent"
     }
     
-    # Write to file
-    ticket_file = os.path.join(
-        os.path.dirname(__file__),
-        f"../../data/tickets/{ticket_id}.json"
-    )
-    
+    ticket_dir = os.path.join(
+    os.path.dirname(__file__),
+    "../../data/tickets"
+)
+
+    os.makedirs(ticket_dir, exist_ok=True)
+
+    ticket_file = os.path.join(ticket_dir, f"{ticket_id}.json")
+
     with open(ticket_file, 'w') as f:
         json.dump(ticket, f, indent=2)
     
@@ -66,7 +70,7 @@ def create_ticket(
         "ticket_id": ticket_id,
         "title": title,
         "created_at": created_at,
-        "severity": severity,
+        "severity": severity_level,
         "status": "open",
         "file_path": ticket_file
     }

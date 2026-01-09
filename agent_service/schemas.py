@@ -86,3 +86,7 @@ class ExecutionResponse(BaseModel):
     status: str
     message: str
     current_step: Optional[int] = None
+
+class ApprovalRequest(BaseModel):
+    approved: bool
+    reason: Optional[str] = None

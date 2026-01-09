@@ -3,14 +3,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
 import json
+import os
+from agent import Agent
+import uvicorn
 
-from database import get_db, engine
-from models import Base, Run, Step, ToolCall, RunStatus
+from database import get_db, engine, SessionLocal
+from models import Base, Run, Step, ToolCall, RunStatus, ToolCallStatus
 from schemas import (
     RunCreate, RunResponse, StepResponse, ToolCallResponse,
-    ToolsListResponse, ToolInfo, ExecutionResponse, ErrorResponse
+    ToolsListResponse, ToolInfo, ExecutionResponse, ErrorResponse, ApprovalRequest
 )
 from tools import list_tools, get_tool, validate_tool_inputs, requires_approval
+from state_machine import State
+from datetime import datetime
 
 Base.metadata.create_all(bind=engine)
 
@@ -47,7 +52,6 @@ def get_tools():
 
 @app.post("/runs", response_model=RunResponse, status_code=201)
 def create_run(run_data: RunCreate, db: Session = Depends(get_db)):
-
     run = Run(
         goal=run_data.goal,
         status=RunStatus.RUNNING
@@ -58,13 +62,59 @@ def create_run(run_data: RunCreate, db: Session = Depends(get_db)):
     
     return run
 
+@app.post("/runs/{run_id}/execute")
+def execute_run(run_id: int):
+    """Execute a run with the agent."""
+    db = SessionLocal()
+    try:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        if not run:
+            raise HTTPException(404, "Run not found")
+        
+        if run.status == RunStatus.DONE:
+            raise HTTPException(400, "Run already completed")
+        
+        if run.status == RunStatus.FAILED:
+            raise HTTPException(400, "Run already failed")
+        
+        # Update status to running
+        run.status = RunStatus.RUNNING
+        db.commit()
+        
+        # Get API key from environment
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise HTTPException(500, "ANTHROPIC_API_KEY not set in environment")
+        
+        # Create and run agent
+        agent = Agent(run_id=run_id, api_key=api_key)
+        agent.run_agent()
+        
+        # Return final status
+        db.refresh(run)
+        return {
+            "run_id": run_id,
+            "status": run.status.value,
+            "message": "Execution completed"
+        }
+    
+    except Exception as e:
+        # Handle errors
+        run = db.query(Run).filter(Run.id == run_id).first()
+        if run:
+            run.status = RunStatus.FAILED
+            db.commit()
+        raise HTTPException(500, f"Execution failed: {str(e)}")
+    
+    finally:
+        db.close()
+
 @app.get("/runs", response_model=List[RunResponse])
 def list_runs(
     limit: int = 20,
     status: str = None,
     db: Session = Depends(get_db)
 ):
-
     query = db.query(Run).order_by(Run.created_at.desc())
     
     if status:
@@ -77,41 +127,64 @@ def list_runs(
     runs = query.limit(limit).all()
     return runs
 
-@app.get("/runs/{run_id}", response_model=RunResponse)
-def get_run(run_id: int, db: Session = Depends(get_db)):
+@app.get("/runs/{run_id}")  
+def get_run(run_id: int):
+    db = SessionLocal()
+    try:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        
+        if not run:
+            raise HTTPException(404, f"Run {run_id} not found")
+        
+        return {
+            "id": run.id,
+            "goal": run.goal,
+            "status": run.status.value,
+            "created_at": run.created_at.isoformat(),
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None
+        }
+    finally:
+        db.close()
 
-    run = db.query(Run).filter(Run.id == run_id).first()
+@app.get("/runs/{run_id}/steps")
+def get_run_steps(run_id: int):
+    db = SessionLocal()
+    try:
+        steps = db.query(Step).filter(Step.run_id == run_id).order_by(Step.step_number).all()
+        
+        result = []
+        for step in steps:
+            step_data = {
+                "step_id": step.id,
+                "run_id": step.run_id,
+                "state": step.state,
+                "step_number": step.step_number,
+                "reasoning": step.reasoning,
+                "created_at": step.created_at,
+                "tool_calls": []
+            }
+            
+            for tc in step.tool_calls:
+                tool_call_data = {
+                    "tool_call_id": tc.id,
+                    "tool_name": tc.tool_name,
+                    "inputs": json.loads(tc.inputs) if tc.inputs else {},  
+                    "outputs": json.loads(tc.outputs) if tc.outputs else {},  
+                    "status": tc.status.value if hasattr(tc.status, 'value') else tc.status,
+                    "executed_at": tc.executed_at,
+                    "error_message": tc.error_message
+                }
+                step_data["tool_calls"].append(tool_call_data)
+            
+            result.append(step_data)
+        
+        return result
     
-    if not run:
-        raise HTTPException(404, f"Run {run_id} not found")
-    
-    return run
-
-@app.post("/runs/{run_id}/execute", response_model=ExecutionResponse)
-def execute_run(run_id: int, db: Session = Depends(get_db)):
-
-    run = db.query(Run).filter(Run.id == run_id).first()
-    
-    if not run:
-        raise HTTPException(404, f"Run {run_id} not found")
-    
-    if run.status != RunStatus.RUNNING:
-        raise HTTPException(
-            400,
-            f"Cannot execute run in status: {run.status.value}"
-        )
-    
-    # TODO: Agent orchestration will go here (Day 5-6)
-    return ExecutionResponse(
-        run_id=run_id,
-        status="started",
-        message="Execution queued (agent not yet implemented)",
-        current_step=None
-    )
+    finally:
+        db.close()
 
 @app.delete("/runs/{run_id}", status_code=204)
 def delete_run(run_id: int, db: Session = Depends(get_db)):
-
     run = db.query(Run).filter(Run.id == run_id).first()
     
     if not run:
@@ -122,58 +195,89 @@ def delete_run(run_id: int, db: Session = Depends(get_db)):
     
     return None
 
+@app.post("/runs/{run_id}/approve")
+def approve_run(run_id: int, approval: ApprovalRequest):
+    """Approve or reject a run requiring approval."""
+    db = SessionLocal()
+    try:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        if not run:
+            raise HTTPException(404, "Run not found")
 
-@app.get("/runs/{run_id}/steps", response_model=List[StepResponse])
+        if run.status != RunStatus.NEEDS_APPROVAL:
+            raise HTTPException(400, "Run is not awaiting approval")
 
-def get_run_steps(run_id: int, db: Session = Depends(get_db)):
-    steps = db.query(Step)\
-        .filter(Step.run_id == run_id)\
-        .order_by(Step.step_number)\
-        .all()
-    
-    return steps
+        latest_step = db.query(Step)\
+            .filter(Step.run_id == run_id)\
+            .order_by(Step.step_number.desc(), Step.created_at.desc())\
+            .first()
 
-@app.post("/runs/{run_id}/steps/{step_id}/approve")
+        if approval.approved:
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise HTTPException(500, "ANTHROPIC_API_KEY not set")
 
-def approve_step(
-    run_id: int,
-    step_id: int,
-    db: Session = Depends(get_db)
-):
-    step = db.query(Step).filter(
-        Step.id == step_id,
-        Step.run_id == run_id
-    ).first()
-    
-    if not step:
-        raise HTTPException(404, "Step not found")
-    
-    if step.state != StepState.NEEDS_APPROVAL:
-        raise HTTPException(
-            400,
-            f"Step is not awaiting approval (current state: {step.state.value})"
+            # Find the pending tool call that is awaiting approval
+            pending_tool_call = db.query(ToolCall)\
+                .join(Step, ToolCall.step_id == Step.id)\
+                .filter(Step.run_id == run_id)\
+                .filter(ToolCall.status == ToolCallStatus.PENDING)\
+                .order_by(ToolCall.created_at.desc())\
+                .first()
+
+            if not pending_tool_call:
+                raise HTTPException(400, "No pending tool call awaiting approval")
+
+            if not requires_approval(pending_tool_call.tool_name):
+                raise HTTPException(
+                    400,
+                    f"Pending tool call {pending_tool_call.tool_name} does not require approval"
+                )
+
+            try:
+                tool_func = get_tool(pending_tool_call.tool_name)
+                inputs = json.loads(pending_tool_call.inputs) if pending_tool_call.inputs else {}
+                result = tool_func(**inputs)
+
+                pending_tool_call.outputs = json.dumps(result)
+                pending_tool_call.status = ToolCallStatus.SUCCESS
+                pending_tool_call.executed_at = datetime.utcnow()
+
+                run.status = RunStatus.RUNNING
+                db.commit()
+
+            except Exception as e:
+                run.status = RunStatus.FAILED
+                db.commit()
+                raise HTTPException(500, f"Approved tool execution failed: {str(e)}")
+
+            # Resume agent from evaluation
+            agent = Agent(run_id=run_id, api_key=api_key)
+            agent.state_machine.current_state = State.EVALUATE
+            agent.run_agent()
+
+            return {"status": "approved", "run_id": run_id}
+
+        run.status = RunStatus.FAILED
+        db.commit()
+
+        step = Step(
+            run_id=run_id,
+            state=State.FAILED.value,
+            step_number=(latest_step.step_number if latest_step else 0) + 1,
         )
-    
-    # TODO: Resume execution (Day 6)
-    return {
-        "run_id": run_id,
-        "step_id": step_id,
-        "status": "approved",
-        "message": "Approval recorded (execution resumption not yet implemented)"
-    }
+        db.add(step)
+        db.commit()
+
+        return {"status": "rejected", "run_id": run_id, "reason": approval.reason}
+
+    finally:
+        db.close()
+
 
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "service": "opspilot-agent"}
 
-@app.exception_handler(ValueError)
-def value_error_handler(request, exc):
-    return ErrorResponse(
-        error="Validation Error",
-        detail=str(exc),
-        status_code=400
-    )
-
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -2,13 +2,12 @@ from enum import Enum
 from typing import Optional, Set, Dict
 
 class State(Enum):
-
-    PLAN = "plan"
-    EXECUTE_TOOL = "execute_tool"
-    EVALUATE = "evaluate"
-    NEEDS_APPROVAL = "needs_approval"
-    DONE = "done"
-    FAILED = "failed"
+    PLAN = "PLAN"  
+    EXECUTE_TOOL = "EXECUTE_TOOL" 
+    EVALUATE = "EVALUATE"  
+    NEEDS_APPROVAL = "NEEDS_APPROVAL" 
+    DONE = "DONE" 
+    FAILED = "FAILED"
 
 class StateMachine:
     
@@ -20,7 +19,8 @@ class StateMachine:
             State.FAILED          
         },
         State.EXECUTE_TOOL: {
-            State.EVALUATE,      
+            State.EVALUATE,  
+            State.NEEDS_APPROVAL,    
             State.FAILED         
         },
         State.EVALUATE: {

@@ -8,21 +8,25 @@ from .generate_report import generate_report
 TOOLS: Dict[str, Dict[str, Any]] = {
     "search_logs": {
         "function": search_logs,
-        "description": "Search through application logs for specific patterns or errors. Returns matching log entries with timestamps and context.",
+        "description": "Search through application logs for specific patterns or errors",
         "schema": {
-            "query": {
-                "type": "string",
-                "description": "Search term or pattern to find in logs",
-                "required": True,
-                "example": "error"
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search term or pattern to find in logs (use query OR pattern)"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Search term or pattern to find in logs (use query OR pattern)"
+                },
+                "time_range": {
+                    "type": "string",
+                    "description": "Time window to search (e.g., '1h', '24h', '7d')",
+                    "default": "1h"
+                }
             },
-            "time_range": {
-                "type": "string",
-                "description": "Time window to search (e.g., '1h', '24h', '7d')",
-                "required": False,
-                "default": "1h",
-                "example": "24h"
-            }
+            "required": [] 
         },
         "requires_approval": False,
         "timeout": 30,
@@ -31,34 +35,42 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     
     "query_metrics": {
         "function": query_metrics,
-        "description": "Query time-series metrics data (error_rate, response_time, cpu_usage, memory_usage). Returns datapoints and statistical aggregates.",
+        "description": "Query time-series metrics data (error_rate, response_time, cpu_usage, memory_usage)",
         "schema": {
-            "metric_name": {
-                "type": "string",
-                "description": "Name of metric to query",
-                "required": True,
-                "enum": ["error_rate", "response_time", "cpu_usage", "memory_usage"],
-                "example": "error_rate"
+            "type": "object",
+            "properties": {
+                "metric": {
+                    "type": "string",
+                    "description": "Name of metric to query (use metric, metric_type, or metric_name)",
+                    "enum": ["error_rate", "response_time", "cpu_usage", "memory_usage"]
+                },
+                "metric_type": {
+                    "type": "string",
+                    "description": "Alternative: type of metric to query",
+                    "enum": ["error_rate", "response_time", "cpu_usage", "memory_usage"]
+                },
+                "metric_name": {
+                    "type": "string",
+                    "description": "Alternative: name of metric to query",
+                    "enum": ["error_rate", "response_time", "cpu_usage", "memory_usage"]
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Start time (ISO format or relative like '1h', '24h')",
+                    "default": "1h" 
+                },
+                "end": {
+                    "type": "string",
+                    "description": "End time (ISO format or 'now')",
+                    "default": "now" 
+                },
+                "interval": {
+                    "type": "string",
+                    "description": "Data aggregation interval",
+                    "default": "5m"
+                }
             },
-            "start": {
-                "type": "string",
-                "description": "Start time (ISO format or relative like '1h', '24h')",
-                "required": True,
-                "example": "1h"
-            },
-            "end": {
-                "type": "string",
-                "description": "End time (ISO format or 'now')",
-                "required": True,
-                "example": "now"
-            },
-            "interval": {
-                "type": "string",
-                "description": "Data aggregation interval",
-                "required": False,
-                "default": "5m",
-                "example": "5m"
-            }
+            "required": []
         },
         "requires_approval": False,
         "timeout": 30,
@@ -67,55 +79,52 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     
     "create_ticket": {
         "function": create_ticket,
-        "description": "Create a new incident ticket. THIS IS A HIGH-RISK ACTION - creates work for humans and should only be used when evidence clearly indicates a problem requiring investigation.",
+        "description": "Create a new incident ticket (HIGH-RISK: requires approval)",
         "schema": {
-            "title": {
-                "type": "string",
-                "description": "Brief, actionable title for the ticket",
-                "required": True,
-                "example": "Payment gateway timeout spike"
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Brief, actionable title for the ticket"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description with evidence, timeline, and impact"
+                },
+                "severity": {
+                    "type": "string",
+                    "description": "Severity level (use severity OR priority)",
+                    "enum": ["critical", "high", "medium", "low"]
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Priority level (use severity OR priority)",
+                    "enum": ["critical", "high", "medium", "low"]
+                },
+                "tags": {
+                    "type": "array",
+                    "description": "Optional categorization tags"
+                }
             },
-            "description": {
-                "type": "string",
-                "description": "Detailed description with evidence, timeline, and impact",
-                "required": True,
-                "example": "15 payment timeouts detected between 09:18-09:30..."
-            },
-            "severity": {
-                "type": "string",
-                "description": "Severity level",
-                "required": True,
-                "enum": ["critical", "high", "medium", "low"],
-                "example": "high"
-            },
-            "tags": {
-                "type": "array",
-                "description": "Optional categorization tags",
-                "required": False,
-                "example": ["payment", "timeout"]
-            }
+            "required": ["title", "description"]
         },
-        "requires_approval": True,  # ← KEY: This tool needs human approval
+        "requires_approval": True,
         "timeout": 10,
         "category": "action"
     },
     
     "generate_report": {
         "function": generate_report,
-        "description": "Generate a markdown investigation report from findings. Use this as the final step to summarize your investigation.",
+        "description": "Generate a markdown investigation report from findings",
         "schema": {
-            "findings": {
-                "type": "array",
-                "description": "List of findings, each with type, summary, and details",
-                "required": True,
-                "example": [
-                    {
-                        "type": "log",
-                        "summary": "Payment errors detected",
-                        "details": {"count": 15, "time_range": "1h"}
-                    }
-                ]
-            }
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "description": "List of findings with type, summary, and details"
+                }
+            },
+            "required": ["findings"]
         },
         "requires_approval": False,
         "timeout": 20,
@@ -153,11 +162,14 @@ def validate_tool_inputs(tool_name: str, inputs: Dict[str, Any]) -> Dict[str, An
     schema = get_tool_schema(tool_name)
     validated = {}
     
-    for param_name, param_config in schema.items():
-        if param_config.get("required", False):
-            if param_name not in inputs:
-                raise ValueError(f"Missing required parameter: {param_name}")
-        
+    properties = schema.get("properties", {})
+    required_params = schema.get("required", [])
+    
+    for param_name in required_params:
+        if param_name not in inputs:
+            raise ValueError(f"Missing required parameter: {param_name}")
+
+    for param_name, param_config in properties.items():
         if param_name in inputs:
             value = inputs[param_name]
         elif "default" in param_config:
