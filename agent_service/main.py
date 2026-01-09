@@ -265,6 +265,7 @@ def approve_run(run_id: int, approval: ApprovalRequest):
             run_id=run_id,
             state=State.FAILED.value,
             step_number=(latest_step.step_number if latest_step else 0) + 1,
+            reasoning=approval.reason or "Approval rejected by user"
         )
         db.add(step)
         db.commit()
