@@ -46,6 +46,11 @@ class Step(Base):
     run = relationship("Run", back_populates="steps")
     tool_calls = relationship("ToolCall", back_populates="step", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        Index('idx_run_id_step_number', 'run_id', 'step_number'),
+        Index('idx_state', 'state'),
+    )
+
 class ToolCallStatus(enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -68,3 +73,8 @@ class ToolCall(Base):
     
     # Relationships
     step = relationship("Step", back_populates="tool_calls")
+
+    __table_args__ = (
+        Index('idx_step_id_status', 'step_id', 'status'),
+        Index('idx_tool_name', 'tool_name'),
+    )

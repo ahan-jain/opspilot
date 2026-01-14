@@ -15,6 +15,8 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
+from logger_config import setup_logging
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -36,6 +38,8 @@ class Agent:
     
     def __init__(self, run_id: int, api_key: str):
         self.run_id = run_id
+        self.logger = setup_logging(run_id=run_id)
+        self.logger.info(f"Agent initialized for run {run_id}")
         self.state_machine = StateMachine()
         self.client = Anthropic(api_key=api_key)
         self.max_steps = 10  # Safety limit: prevent infinite loops
@@ -49,7 +53,7 @@ class Agent:
     )
         
         self.logger = logging.getLogger(f"Agent-{run_id}")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.INFO)
         
         log_file = logging.FileHandler(f"logs/run_{run_id}.log")
         log_file.setFormatter(logging.Formatter(
