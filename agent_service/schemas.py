@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from models import RunStatus, StepState, ToolCallStatus
+import schemas
 
 class RunCreate(BaseModel):
     goal: str = Field(

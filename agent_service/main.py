@@ -6,7 +6,6 @@ import json
 import os
 from agent import Agent
 import uvicorn
-
 from database import get_db, engine, SessionLocal
 from models import Base, Run, Step, ToolCall, RunStatus, ToolCallStatus
 from schemas import (
@@ -109,79 +108,48 @@ def execute_run(run_id: int):
     finally:
         db.close()
 
-@app.get("/runs", response_model=List[RunResponse])
-def list_runs(
-    limit: int = 20,
-    status: str = None,
-    db: Session = Depends(get_db)
-):
-    query = db.query(Run).order_by(Run.created_at.desc())
+@app.get("/runs")  
+def list_runs(limit: int = 20, db: Session = Depends(get_db)):
+
+    runs = db.query(Run).order_by(Run.created_at.desc()).limit(limit).all()
     
-    if status:
-        try:
-            status_enum = RunStatus(status)
-            query = query.filter(Run.status == status_enum)
-        except ValueError:
-            raise HTTPException(400, f"Invalid status: {status}")
+    for run in runs:
+        for step in run.steps:
+            for tc in step.tool_calls:
+                if tc.inputs and isinstance(tc.inputs, str):
+                    tc.inputs = json.loads(tc.inputs)
+                if tc.outputs and isinstance(tc.outputs, str):
+                    tc.outputs = json.loads(tc.outputs)
     
-    runs = query.limit(limit).all()
     return runs
 
 @app.get("/runs/{run_id}")  
-def get_run(run_id: int):
-    db = SessionLocal()
-    try:
-        run = db.query(Run).filter(Run.id == run_id).first()
-        
-        if not run:
-            raise HTTPException(404, f"Run {run_id} not found")
-        
-        return {
-            "id": run.id,
-            "goal": run.goal,
-            "status": run.status.value,
-            "created_at": run.created_at.isoformat(),
-            "updated_at": run.updated_at.isoformat() if run.updated_at else None
-        }
-    finally:
-        db.close()
-
-@app.get("/runs/{run_id}/steps")
-def get_run_steps(run_id: int):
-    db = SessionLocal()
-    try:
-        steps = db.query(Step).filter(Step.run_id == run_id).order_by(Step.step_number).all()
-        
-        result = []
-        for step in steps:
-            step_data = {
-                "step_id": step.id,
-                "run_id": step.run_id,
-                "state": step.state,
-                "step_number": step.step_number,
-                "reasoning": step.reasoning,
-                "created_at": step.created_at,
-                "tool_calls": []
-            }
-            
-            for tc in step.tool_calls:
-                tool_call_data = {
-                    "tool_call_id": tc.id,
-                    "tool_name": tc.tool_name,
-                    "inputs": json.loads(tc.inputs) if tc.inputs else {},  
-                    "outputs": json.loads(tc.outputs) if tc.outputs else {},  
-                    "status": tc.status.value if hasattr(tc.status, 'value') else tc.status,
-                    "executed_at": tc.executed_at,
-                    "error_message": tc.error_message
-                }
-                step_data["tool_calls"].append(tool_call_data)
-            
-            result.append(step_data)
-        
-        return result
+def get_run(run_id: int, db: Session = Depends(get_db)):
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
     
-    finally:
-        db.close()
+    for step in run.steps:
+        for tc in step.tool_calls:
+            if tc.inputs and isinstance(tc.inputs, str):
+                tc.inputs = json.loads(tc.inputs)
+            if tc.outputs and isinstance(tc.outputs, str):
+                tc.outputs = json.loads(tc.outputs)
+    
+    return run
+
+@app.get("/runs/{run_id}/steps")  
+def get_run_steps(run_id: int, db: Session = Depends(get_db)):
+    steps = db.query(Step).filter(Step.run_id == run_id).order_by(Step.step_number).all()
+    
+    for step in steps:
+        for tc in step.tool_calls:
+            if tc.inputs and isinstance(tc.inputs, str):
+                tc.inputs = json.loads(tc.inputs)
+            if tc.outputs and isinstance(tc.outputs, str):
+                tc.outputs = json.loads(tc.outputs)
+    
+    return steps
 
 @app.delete("/runs/{run_id}", status_code=204)
 def delete_run(run_id: int, db: Session = Depends(get_db)):
