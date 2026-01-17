@@ -44,10 +44,7 @@ def query_metrics(
     end_time = _parse_time(end)
     
     # Load metrics data
-    metrics_file = os.path.join(
-        os.path.dirname(__file__),
-        "../../data/metrics/metrics.json"
-    )
+    metrics_file = "/app/data/metrics/metrics.json"
     
     with open(metrics_file, 'r') as f:
         all_metrics = json.load(f)

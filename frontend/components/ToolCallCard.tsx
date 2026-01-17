@@ -51,7 +51,7 @@ export default function ToolCallCard({
           </span>
           
           <span className="text-xs text-gray-500">
-            {formatDistanceToNow(new Date(toolCall.created_at), {addSuffix: true})}
+            {formatDistanceToNow(new Date(toolCall.created_at + 'Z'), {addSuffix: true})}
           </span>
         </div>
 

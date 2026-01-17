@@ -1,0 +1,15 @@
+**/.git
+**/.gitignore
+**/.vscode
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.db
+**/logs
+**/node_modules
+**/.next
+**/venv
+**/env
+**/.env.local
+**/README.md
+**/*.md

@@ -116,7 +116,7 @@ export default function Home() {
                         {run.goal}
                       </p>
                       <p className="text-sm text-gray-500 mt-1">
-                        {formatDistanceToNow(new Date(run.created_at), {addSuffix: true})}
+                        {formatDistanceToNow(new Date(run.created_at + 'Z'), {addSuffix: true})}
                       </p>
                     </div>
                     <span className={`

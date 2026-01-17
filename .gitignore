@@ -7,8 +7,6 @@ __pycache__/
 venv/
 env/
 ENV/
-.env
-.env.local
 *.egg-info/
 dist/
 build/
@@ -19,7 +17,7 @@ build/
 *.sqlite
 *.sqlite3
 
-# Node / Frontend (only global ignores)
+# Node / Frontend
 node_modules/
 .next/
 out/
@@ -46,13 +44,20 @@ coverage/
 *.tmp
 *.bak
 
+# Environment variables
+.env
+.env.local
+.env.*.local
+
 # Data directories
-data/tickets/
 logs/
+data/tickets/*.json
 
 # Redis
 dump.rdb
 
-# Default boilerplate files
-frontend/README.md
-frontend/public/*.svg
+# Docker
+.docker/
+
+# Generated tickets (keep directory structure)
+!data/tickets/.gitkeep

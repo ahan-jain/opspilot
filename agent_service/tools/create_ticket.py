@@ -54,10 +54,7 @@ def create_ticket(
         "created_by": "opspilot-agent"
     }
     
-    ticket_dir = os.path.join(
-    os.path.dirname(__file__),
-    "../../data/tickets"
-)
+    ticket_dir = "/app/data/tickets"
 
     os.makedirs(ticket_dir, exist_ok=True)
 

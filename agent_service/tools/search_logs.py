@@ -29,7 +29,8 @@ def search_logs(query: str = None, pattern: str = None, time_range: str = "1h") 
         }
     cutoff_time = _parse_time_range(time_range)
     
-    log_dir = os.path.join(os.path.dirname(__file__), "../../data/logs")
+    log_dir = "/app/data/logs"
+
     matches = []
     
     for log_file in os.listdir(log_dir):

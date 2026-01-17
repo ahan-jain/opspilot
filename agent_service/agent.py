@@ -5,6 +5,7 @@ from anthropic import Anthropic
 import logging
 import sys
 import redis
+import os
 
 from state_machine import StateMachine, State
 from tools import get_tool, validate_tool_inputs, requires_approval, list_tools
@@ -46,11 +47,8 @@ class Agent:
         self.current_step_number = 0
         self.db = SessionLocal()
 
-        self.redis_client = redis.Redis(
-        host='localhost',
-        port=6379,
-        decode_responses=True
-    )
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+        self.redis_client = redis.from_url(redis_url, decode_responses=True)
         
         self.logger = logging.getLogger(f"Agent-{run_id}")
         self.logger.setLevel(logging.INFO)
