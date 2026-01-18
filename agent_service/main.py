@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
@@ -15,6 +15,7 @@ from schemas import (
 from tools import list_tools, get_tool, validate_tool_inputs, requires_approval
 from state_machine import State
 from datetime import datetime
+import asyncio
 
 Base.metadata.create_all(bind=engine)
 
@@ -31,6 +32,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def run_agent_with_mcp(run_id: int, api_key: str):
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        agent = Agent(run_id=run_id, api_key=api_key)
+        loop.run_until_complete(agent.initialize_mcp())
+        agent.run_agent()
+        
+        loop.close()
+        
+    except Exception as e:
+        print(f"Agent execution failed: {e}")
+        import traceback
+        traceback.print_exc()
+        db = SessionLocal()
+        try:
+            run = db.query(Run).filter(Run.id == run_id).first()
+            if run:
+                run.status = RunStatus.FAILED
+                db.commit()
+        finally:
+            db.close()
 
 @app.get("/tools", response_model=ToolsListResponse)
 def get_tools():
@@ -62,8 +86,7 @@ def create_run(run_data: RunCreate, db: Session = Depends(get_db)):
     return run
 
 @app.post("/runs/{run_id}/execute")
-def execute_run(run_id: int):
-    """Execute a run with the agent."""
+def execute_run(run_id: int, background_tasks: BackgroundTasks):
     db = SessionLocal()
     try:
         run = db.query(Run).filter(Run.id == run_id).first()
@@ -76,34 +99,20 @@ def execute_run(run_id: int):
         if run.status == RunStatus.FAILED:
             raise HTTPException(400, "Run already failed")
         
-        # Update status to running
         run.status = RunStatus.RUNNING
         db.commit()
         
-        # Get API key from environment
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise HTTPException(500, "ANTHROPIC_API_KEY not set in environment")
         
-        # Create and run agent
-        agent = Agent(run_id=run_id, api_key=api_key)
-        agent.run_agent()
+        background_tasks.add_task(run_agent_with_mcp, run_id, api_key)
         
-        # Return final status
-        db.refresh(run)
         return {
             "run_id": run_id,
-            "status": run.status.value,
-            "message": "Execution completed"
+            "status": "started",
+            "message": "Execution started in background"
         }
-    
-    except Exception as e:
-        # Handle errors
-        run = db.query(Run).filter(Run.id == run_id).first()
-        if run:
-            run.status = RunStatus.FAILED
-            db.commit()
-        raise HTTPException(500, f"Execution failed: {str(e)}")
     
     finally:
         db.close()
@@ -164,8 +173,7 @@ def delete_run(run_id: int, db: Session = Depends(get_db)):
     return None
 
 @app.post("/runs/{run_id}/approve")
-def approve_run(run_id: int, approval: ApprovalRequest):
-    """Approve or reject a run requiring approval."""
+def approve_run(run_id: int, approval: ApprovalRequest, background_tasks: BackgroundTasks):
     db = SessionLocal()
     try:
         run = db.query(Run).filter(Run.id == run_id).first()
@@ -219,10 +227,16 @@ def approve_run(run_id: int, approval: ApprovalRequest):
                 db.commit()
                 raise HTTPException(500, f"Approved tool execution failed: {str(e)}")
 
-            # Resume agent from evaluation
-            agent = Agent(run_id=run_id, api_key=api_key)
-            agent.state_machine.current_state = State.EVALUATE
-            agent.run_agent()
+            def resume_agent():
+                agent = Agent(run_id=run_id, api_key=api_key)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(agent.initialize_mcp())
+                agent.state_machine.current_state = State.EVALUATE
+                agent.run_agent()
+                loop.close()
+            
+            background_tasks.add_task(resume_agent)
 
             return {"status": "approved", "run_id": run_id}
 

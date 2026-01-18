@@ -54,6 +54,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                     "description": "Alternative: name of metric to query",
                     "enum": ["error_rate", "response_time", "cpu_usage", "memory_usage"]
                 },
+                "metric_names": {
+                    "type": "string",
+                    "description": "Alternative: name of metric to query",
+                    "enum": ["error_rate", "response_time", "cpu_usage", "memory_usage"]
+                },
                 "start": {
                     "type": "string",
                     "description": "Start time (ISO format or relative like '1h', '24h')",
@@ -159,6 +164,10 @@ def list_tools() -> Dict[str, Any]:
     }
 
 def validate_tool_inputs(tool_name: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
+
+    if tool_name not in TOOLS:
+        return inputs
+    
     schema = get_tool_schema(tool_name)
     validated = {}
     

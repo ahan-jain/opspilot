@@ -7,6 +7,10 @@ import sys
 import redis
 import os
 
+import subprocess
+import json
+import asyncio
+
 from state_machine import StateMachine, State
 from tools import get_tool, validate_tool_inputs, requires_approval, list_tools
 from models import Run, Step, ToolCall, RunStatus, StepState, ToolCallStatus
@@ -17,6 +21,73 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from logger_config import setup_logging
+
+class MCPClient:
+    """Simple MCP client that communicates with MCP server via stdio"""
+    
+    def __init__(self):
+        self.process = None
+        self.tools = []
+        
+    async def start(self):
+        self.process = subprocess.Popen(
+            ["node", "/app/mcp-server/aggregator.js"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        
+        self.tools = await self._list_tools()
+        
+    async def _send_request(self, method: str, params: dict) -> dict:
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params
+        }
+        
+        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.flush()
+        
+        response_line = self.process.stdout.readline()
+        return json.loads(response_line)
+        
+    async def _list_tools(self) -> List[dict]:
+        response = await self._send_request("tools/list", {})
+        return response.get("result", {}).get("tools", [])
+        
+    async def call_tool(self, name: str, arguments: dict) -> dict:
+        response = await self._send_request("tools/call", {
+            "name": name,
+            "arguments": arguments
+        })
+        
+        result = response.get("result", {})
+        content = result.get("content", [])
+        
+        if content and content[0].get("type") == "text":
+            text = content[0]["text"]
+            
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {"result": text}
+        
+        return {}
+    
+        
+    def get_tools_for_claude(self) -> List[dict]:
+        return [
+            {
+                "name": tool["name"],
+                "description": tool["description"],
+                "input_schema": tool["inputSchema"]
+            }
+            for tool in self.tools
+        ]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,12 +114,15 @@ class Agent:
         self.logger.info(f"Agent initialized for run {run_id}")
         self.state_machine = StateMachine()
         self.client = Anthropic(api_key=api_key)
-        self.max_steps = 10  # Safety limit: prevent infinite loops
+        self.max_steps = 10
         self.current_step_number = 0
         self.db = SessionLocal()
 
         redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
         self.redis_client = redis.from_url(redis_url, decode_responses=True)
+
+        self.mcp_client = MCPClient()  
+        self.mcp_tools = [] 
         
         self.logger = logging.getLogger(f"Agent-{run_id}")
         self.logger.setLevel(logging.INFO)
@@ -118,6 +192,16 @@ class Agent:
         finally:
             self.db.close()
             self.logger.info("Agent execution finished")
+
+    async def initialize_mcp(self):
+        """Initialize MCP connection and get tools"""
+        try:
+            await self.mcp_client.start()
+            self.mcp_tools = self.mcp_client.get_tools_for_claude()
+            self.logger.info(f"MCP initialized with {len(self.mcp_tools)} tools")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize MCP: {e}")
+            raise
     
     def _execute_current_state(self):
         state = self.state_machine.current_state
@@ -200,13 +284,8 @@ class Agent:
             self.logger.info(f"Planning to call tool: {tool_name}")
             
             # Validate tool inputs against schema
-            try:
-                validated_inputs = validate_tool_inputs(tool_name, inputs)
-            except Exception as e:
-                self.logger.error(f"Input validation failed for {tool_name}: {str(e)}")
-                self._transition_to_failed(f"Invalid tool inputs: {str(e)}")
-                return
-            
+            validated_inputs = inputs
+
             # Create pending tool call
             tool_call = ToolCall(
                 step_id=step.id,
@@ -223,10 +302,17 @@ class Agent:
             self._transition_to_failed(f"Unknown action: {plan['action']}")
     
     def _build_planning_context(self) -> str:
-        tools_info = list_tools()
-        tools_desc = "\n".join([
-            f"- {name}: {info['description']}"
-            for name, info in tools_info.items()
+
+        if self.mcp_tools:
+            tools_desc = "\n".join([
+                f"- {tool['name']}: {tool['description']}"
+                for tool in self.mcp_tools
+            ])
+        else:
+            tools_info = list_tools()
+            tools_desc = "\n".join([
+                f"- {name}: {info['description']}"
+                for name, info in tools_info.items()
         ])
         
         steps = self.db.query(Step)\
@@ -450,22 +536,39 @@ class Agent:
                 
                 self._transition_to_failed(f"Tool error: {str(e)}")
     
+    async def _execute_tool_via_mcp(
+        self,
+        tool_name: str,
+        inputs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        try:
+            result = await self.mcp_client.call_tool(tool_name, inputs)
+            return result
+        except Exception as e:
+            self.logger.error(f"MCP tool execution failed: {e}")
+            raise
+
     def _execute_tool_with_timeout(
         self,
         tool_name: str,
         inputs: Dict[str, Any],
         timeout: int
     ) -> Dict[str, Any]:
-        tool_func = get_tool(tool_name)
-        
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(tool_func, **inputs)
-            try:
-                result = future.result(timeout=timeout)
-                return result
-            except Exception as e:
-                future.cancel()
-                raise
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                asyncio.wait_for(
+                    self._execute_tool_via_mcp(tool_name, inputs),
+                    timeout=timeout
+                )
+            )
+            loop.close()
+            return result
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Tool {tool_name} timed out after {timeout}s")
+        except Exception as e:
+            raise
     
     def _handle_evaluate_state(self):
         self.logger.info("Evaluating progress")

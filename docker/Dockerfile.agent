@@ -1,15 +1,26 @@
 FROM python:3.12-slim
 
-WORKDIR /app
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
 COPY agent_service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent_service/ .
+
+COPY mcp-server/ /app/mcp-server/
+WORKDIR /app/mcp-server
+RUN npm install
+
+WORKDIR /app
+
 RUN mkdir -p logs data/tickets
-COPY data/ /app/data/
 
 RUN python init_db.py
 

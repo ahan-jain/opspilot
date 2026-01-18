@@ -8,8 +8,10 @@ def query_metrics(
     metric: str = None,
     metric_type: str = None,
     metric_name: str = None,
+    metric_names: str = None,
     start: str = "1h",
     end: str = "now",
+    time_range: str = None,
     interval: str = "5m"
 ) -> Dict:
     """
@@ -30,12 +32,14 @@ def query_metrics(
             "time_range": {"start": str, "end": str}
         }
     """
+    if time_range:
+        start = time_range
 
-    metric_to_query = metric or metric_type or metric_name
+    metric_to_query = metric or metric_type or metric_name or metric_names
     
     if not metric_to_query:
         return {
-            "error": "Must provide metric, metric_type, or metric_name parameter",
+            "error": "Must provide metric, metric_type, or metric_name(s) parameter",
             "datapoints": [],
             "aggregates": {}
         }

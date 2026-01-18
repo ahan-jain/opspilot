@@ -17,6 +17,23 @@ OpsPilot is an intelligent operations agent that investigates incidents, analyze
 
 ---
 
+### **Model Context Protocol (MCP) Integration**
+
+OpsPilot uses the [Model Context Protocol](https://modelcontextprotocol.io) for standardized tool discovery and execution:
+
+- **7 Tools via MCP**: Operations tools (log search, metrics, tickets, reports) + filesystem tools (read, write, list)
+- **Dynamic Tool Discovery**: Agent discovers available tools at runtime via MCP protocol
+- **MCP Aggregator**: Node.js server combines multiple tool sources (ops + filesystem)
+- **Standardized Interface**: Tools exposed via JSON-RPC 2.0 over stdio
+- **Interoperability**: External Claude instances can connect to OpsPilot's MCP server
+
+**MCP Architecture:**
+```
+Agent (Python) ←─ stdio ─→ MCP Aggregator (Node.js) ─┬─→ OpsPilot Tools (Python)
+                                                       └─→ Filesystem Tools (Node.js)
+```
+---
+
 ## Architecture
 ```
 ┌─────────────┐
@@ -88,6 +105,77 @@ PLAN ──────→ EXECUTE_TOOL ──────→ EVALUATE
 ```bash
 docker-compose -f docker/docker-compose.yml down
 ```
+
+### Troubleshooting
+
+**If containers aren't starting or changes aren't reflecting:**
+```bash
+# Hard restart (fixes most issues)
+docker-compose -f docker/docker-compose.yml down
+docker-compose -f docker/docker-compose.yml build --no-cache
+docker-compose -f docker/docker-compose.yml up
+```
+
+**If MCP tools aren't working:**
+```bash
+# Verify MCP server files exist
+docker-compose -f docker/docker-compose.yml exec agent ls -la /app/mcp-server/
+
+# Check MCP initialization
+docker-compose -f docker/docker-compose.yml logs agent | grep "MCP initialized"
+```
+
+**Common Issues:**
+- **Port conflicts**: Make sure ports 3000 and 8000 aren't in use
+- **Volume mounts**: Changes to Python/Node files may require a rebuild
+- **Database reset**: Remove `RUN python init_db.py` from Dockerfile if you want to preserve data between rebuilds
+```
+
+---
+
+**Update "Project Structure" to include MCP:**
+```
+opspilot/
+├── agent_service/          # Backend API and agent
+│   ├── agent.py           # Core agent with state machine
+│   ├── main.py            # FastAPI server
+│   ├── models.py          # SQLAlchemy models
+│   ├── state_machine.py   # State definitions
+│   ├── database.py        # Database configuration
+│   ├── tools/             # Tool implementations
+│   │   ├── __init__.py    # Tool registry
+│   │   ├── search_logs.py
+│   │   ├── query_metrics.py
+│   │   ├── create_ticket.py
+│   │   └── generate_report.py
+│   ├── init_db.py         # Database initialization
+│   └── requirements.txt
+├── mcp-server/            # MCP server (Node.js)
+│   ├── aggregator.js      # MCP aggregator combining tool sources
+│   ├── opspilot-tools.js  # OpsPilot operations tools
+│   ├── server.js          # Original MCP server
+│   └── package.json
+├── frontend/              # Next.js dashboard
+│   ├── app/
+│   │   ├── page.tsx       # Home page with run list
+│   │   ├── runs/[id]/     # Run detail page
+│   │   └── layout.tsx
+│   ├── components/
+│   │   ├── FinalReport.tsx
+│   │   ├── Timeline.tsx
+│   │   └── ToolCallCard.tsx
+│   ├── lib/
+│   │   └── api.ts         # API client
+│   └── package.json
+├── docker/                # Docker configuration
+│   ├── docker-compose.yml
+│   ├── Dockerfile.agent
+│   └── Dockerfile.frontend
+├── data/                  # Mock data for testing
+│   ├── logs/
+│   ├── metrics/
+│   └── tickets/
+└── README.md
 
 ---
 
@@ -162,10 +250,18 @@ Access at http://localhost:3000
 
 ## Available Tools
 
+### Operations Tools
 - **`search_logs`**: Search application logs by pattern and time range
-- **`query_metrics`**: Query time-series metrics (error rate, response time, CPU, memory)
+- **`query_metrics`**: Query time-series metrics (error_rate, response_time, cpu_usage, memory_usage)
 - **`create_ticket`**: Create incident tickets (requires approval)
 - **`generate_report`**: Generate investigation reports with findings
+
+### Filesystem Tools (via MCP)
+- **`read_file`**: Read contents from /app/data directory
+- **`write_file`**: Write contents to /app/data directory
+- **`list_directory`**: List files and directories in /app/data
+
+All tools are dynamically discovered via MCP protocol at runtime.
 
 ### Adding New Tools
 
@@ -261,7 +357,8 @@ curl http://localhost:8000/runs/1
 
 ### Technologies
 
-- **Backend:** FastAPI, SQLAlchemy, Redis, Anthropic Claude API
+- **Backend:** FastAPI, SQLAlchemy, Redis, Anthropic Claude API (Sonnet 4)
+- **MCP Server:** Node.js, @modelcontextprotocol/sdk
 - **Frontend:** Next.js 15, React, Tailwind CSS, TypeScript
 - **Database:** SQLite (dev), PostgreSQL-ready
 - **Deployment:** Docker Compose
@@ -269,10 +366,12 @@ curl http://localhost:8000/runs/1
 ### Key Design Decisions
 
 1. **Explicit State Machine**: Makes agent behavior predictable and debuggable
-2. **Approval Workflows**: Prevents autonomous actions from causing issues
-3. **Audit Trail**: Every step, tool call, and decision is logged
-4. **Retry Logic**: Redis-backed exponential backoff for API failures
-5. **Tool Abstraction**: Clean interface for adding new capabilities
+2. **MCP Integration**: Standardized protocol for tool discovery and execution
+3. **Tool Aggregation**: Combines multiple tool sources (ops + filesystem) via MCP
+4. **Approval Workflows**: Prevents autonomous actions from causing issues
+5. **Audit Trail**: Every step, tool call, and decision is logged
+6. **Retry Logic**: Redis-backed exponential backoff for API failures
+7. **Tool Abstraction**: Clean interface for adding new capabilities
 
 ---
 

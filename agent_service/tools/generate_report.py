@@ -1,7 +1,10 @@
 from typing import Dict, List
 from datetime import datetime
 
-def generate_report(findings: List[Dict]) -> Dict:
+def generate_report(findings: List[Dict] = None,
+    title: str = None,
+    recommendations: List[str] = None,
+    output_file: str = None) -> Dict:
     """
     Generate a markdown report from investigation findings.
     
@@ -22,11 +25,7 @@ def generate_report(findings: List[Dict]) -> Dict:
         }
     """
     if not findings:
-        return {
-            "report": "# Investigation Report\n\nNo findings to report.",
-            "summary": "No significant findings.",
-            "findings_count": 0
-        }
+        findings = []
     
     report_lines = []
     report_lines.append("# OpsPilot Investigation Report")
